@@ -30,11 +30,13 @@ from requests.packages.urllib3.exceptions import SNIMissingWarning
 import datetime
 import wave
 
+import threading
+
 logging.captureWarnings(True)
 requests.packages.urllib3.disable_warnings(InsecurePlatformWarning)
 requests.packages.urllib3.disable_warnings(SNIMissingWarning)
 
-CLIP_MIN_MS = 500  # 500ms - the minimum audio clip that will be used
+CLIP_MIN_MS = 100  # 100ms - the minimum audio clip that will be used
 MAX_LENGTH = 10000  # Max length of a sound clip for processing in ms
 SILENCE = 20  # How many continuous frames of silence determine the end of a phrase
 
@@ -68,8 +70,12 @@ class BufferedPipe(object):
         self.count = 0
         self.payload = b''
 
+        self.is_processing = False
+
     def append(self, data, id):
         """ Add another data to the buffer. `data` should be a `bytes` object. """
+        if self.is_processing:
+            return
 
         self.count += 1
         self.payload += data
@@ -79,9 +85,21 @@ class BufferedPipe(object):
 
     def process(self, id):
         """ Process and clear the buffer. """
-        self.sink(self.count, self.payload, id)
-        self.count = 0
-        self.payload = b''
+        if self.is_processing:
+            return
+
+        self.is_processing = True
+        thread = threading.Thread(target=self.process_thread(id))
+        thread.daemon = True
+        thread.start()
+
+    def process_thread(self, id):
+        def process_thread_inner():
+            self.sink(self.count, self.payload, id)
+            self.count = 0
+            self.payload = b''
+            self.is_processing = False
+        return process_thread_inner
 
 
 class LexProcessor(object):
@@ -123,6 +141,7 @@ class LexProcessor(object):
             conn.write_message(data, binary=True)
             time.sleep(0.018)
             pos = newpos
+        time.sleep(0.5)
 
 
 
@@ -143,6 +162,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
         debug(self.request.uri)
         self.path = self.request.uri
         self.tick = 0
+        self.set_nodelay(True)
     def on_message(self, message):
         # Check if message is Binary or Text
         if type(message) == str:
